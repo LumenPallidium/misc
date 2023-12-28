@@ -82,7 +82,7 @@ def sample(model, n_samples = 1, conditioning = None):
     Returns
     -------
     x : torch.Tensor
-        The sampled tensor.
+        The sampled tensor (an image here).
     """
     with torch.no_grad():
         image = torch.randn(n_samples, *model.in_shape, device = model.device)
@@ -209,6 +209,34 @@ class ResBlock(torch.nn.Module):
         return x + res
 
 class DiffusionModel(torch.nn.Module):
+    """
+    A U-Net style model for diffusion. Note that it contains
+    the diffusion parameters as buffers.
+
+    Parameters
+    ----------
+    in_shape : tuple
+        The shape of the input tensor.
+    timestep_embed_dim : int
+        The number of channels to use for embedding timesteps.
+    diffusion_steps : int
+        The number of diffusion steps to use.
+    channels : list
+        The number of channels for the first layer in the U-Net.
+    n_downsamples : int
+        The number of downsamples to use in the U-Net.
+    down_scale : int
+        The scale factor for downsampling. Also the channel
+        multiple to use for channel numbers in lower layers.
+    kernel_size : int
+        The kernel size for the convolutional layers.
+    beta_min : float
+        The minimum beta (noise variance) to use for diffusion.
+    beta_max : float
+        The maximum beta (noise variance) to use for diffusion.
+    device : str
+        The device to use for the model.
+    """
     def __init__(self,
                  in_shape,
                  timestep_embed_dim = 16,
@@ -290,11 +318,13 @@ class DiffusionModel(torch.nn.Module):
             The input tensor.
         embed : torch.Tensor
             The timesteps to embed
+        conditioning : torch.Tensor
+            The conditioning tensor.
 
         Returns
         -------
         x : torch.Tensor
-            The output tensor.
+            Output tensor, should essentially be the predicted noise.
         """
         if conditioning is not None:
             embed = embed_timesteps(timesteps, self.timestep_embed_dim // 2)
