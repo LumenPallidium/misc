@@ -425,5 +425,15 @@ if __name__ == "__main__":
                 param_ema.data.mul_(ema_decay)
                 param_ema.data.add_((1 - ema_decay) * param.data)
 
+    # save final samples
+    condition = torch.arange(10, device = device)
+    samples = sample(model_ema, n_samples = 10, conditioning = condition)
+    samples = samples.detach().cpu()
+    samples = samples.permute(0, 2, 3, 1).squeeze()
+    samples = np.hstack(samples.numpy())
+    samples = (samples * 255).astype(np.uint8)
+    step = str(pbar.n).zfill(5)
+    Image.fromarray(samples).save(f"samples/diffusion_final.png")
+
 
 
