@@ -54,7 +54,7 @@ class LKIS(torch.nn.Module):
                  delay,
                  hidden_dim,
                  bottleneck_dim = None,
-                 hidden_mults = 3,
+                 hidden_mults = [3, 2, 1],
                  use_decoder = True,
                  alpha = 0.01):
         """
@@ -86,6 +86,8 @@ class LKIS(torch.nn.Module):
         self.bottleneck_dim = bottleneck_dim
         self.alpha = alpha
 
+        assert bottleneck_dim % delay == 0, "hidden_dim must be divisible by delay"
+
         if isinstance(hidden_mults, int):
             hidden_mults = [hidden_mults]
         self.hidden_mults = hidden_mults
@@ -96,8 +98,7 @@ class LKIS(torch.nn.Module):
         if self.use_decoder:
             hidden_mults = hidden_mults[::-1]
             self.decoder = MLP(bottleneck_dim, hidden_dim, hidden_mults)
-            # note deembedder does not reconstruct whole sequence, only the last element
-            self.deembedder = torch.nn.Linear(hidden_dim, input_dim)
+            self.deembedder = torch.nn.Linear(hidden_dim, input_dim * delay)
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -107,8 +108,13 @@ class LKIS(torch.nn.Module):
         if self.use_decoder:
             x_hat = self.decoder(x)
             x_hat = self.deembedder(x_hat)
+            x_hat = x_hat.view(batch_size, self.delay, -1)
         else:
             x_hat = None
+
+        # unstack x
+        x = x.view(batch_size, self.delay, -1)
+
         return x, x_hat
     
     def get_loss(self, x_t, x_t1):
@@ -128,18 +134,22 @@ class LKIS(torch.nn.Module):
             y_t, x_t_hat = self.forward(x_t)
         y_t1, x_t1_hat = self.forward(x_t1)
 
-        #TODO : y_t is ill-conditioned sometimes
-        A = (y_t1 @ torch.pinverse(y_t)) @ y_t
-        # frobenius norm of y_t1 - A
-        loss = torch.norm(y_t1 - A) ** 2
+        y_t = y_t.permute(0, 2, 1)
+        y_t1 = y_t1.permute(0, 2, 1)
+
+        A = (y_t1 @ torch.pinverse(y_t)) 
+        Ay = A @ y_t
+        # frobenius norm of y_t1 - Ay
+        loss = torch.linalg.matrix_norm(y_t1 - Ay).sum()
 
         if self.use_decoder:
             rec_loss = 0
             # only get last element of x_t_hat
-            rec_loss += mse_loss(x_t[:, -1, :], x_t_hat)
-            rec_loss += mse_loss(x_t1[:, -1, :], x_t1_hat)
+            rec_loss += mse_loss(x_t, x_t_hat)
+            rec_loss += mse_loss(x_t1, x_t1_hat)
             loss += self.alpha * rec_loss
         return loss
+
     
 class FitzHughNagumoDS:
     """
@@ -159,22 +169,29 @@ class FitzHughNagumoDS:
         x = x0
         x_t = [x.clone()]
         for t in range(T - 1):
-            x[:, 0].add_(dt * ((x[:, 0] ** 3) / 3 + x[:, 0] - x[:, 1] + self.I))
+            x[:, 0].add_(dt * (-(x[:, 0] ** 3) / 3 + x[:, 0] - x[:, 1] + self.I))
             x[:, 1].add_(dt * self.c * (x[:, 0] - self.b * x[:, 1] + self.a))
 
             x_t.append(x.clone())
         x_t = torch.stack(x_t, dim = 1)
 
         return x_t # batch, T, 2
-    
+
+#TODO : cleanup below
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
+    import numpy as np
     from tqdm import tqdm
     DELAY = 16
-    N_STEPS = 100
+    N_STEPS = 500
+    BATCH_SIZE = 512
+    HIDDEN_DIM = 32
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = LKIS(2, DELAY, 8, use_decoder = True)
+    model = LKIS(2,
+                 DELAY,
+                 HIDDEN_DIM * DELAY,
+                 use_decoder = True)
     model.to(device)
     ds = FitzHughNagumoDS()
 
@@ -184,7 +201,8 @@ if __name__ == "__main__":
     for i in tqdm(range(N_STEPS)):
         optimizer.zero_grad()
 
-        sample = ds.sample(T = DELAY + 1).to(device)
+        sample = ds.sample(T = DELAY + 1,
+                           batch_size = BATCH_SIZE).to(device)
         x_t = sample[:, :-1, :].detach().clone()
         x_t1 = sample[:, 1:, :].detach().clone().requires_grad_(True)
 
@@ -194,7 +212,56 @@ if __name__ == "__main__":
 
         losses.append(loss.item())
 
-    plt.plot(losses)
+    with torch.no_grad():
+        sample = ds.sample(T = (DELAY + 1) * BATCH_SIZE,
+                           batch_size = 1).to(device)
+        sample = sample.view(BATCH_SIZE, DELAY + 1, 2)
+        x_t = sample[:, :-1, :].detach().clone()
+        x_t1 = sample[:, 1:, :].detach().clone()
+
+        y_t, x_t_hat = model.forward(x_t)
+        y_t1, x_t1_hat  = model.forward(x_t1)
+
+        # this is the Koopman operator
+        y_t = y_t.permute(0, 2, 1)
+        y_t1 = y_t1.permute(0, 2, 1)
+        A = (y_t1 @ torch.pinverse(y_t)).mean(dim = 0)
+
+        y_t = y_t.reshape(DELAY * BATCH_SIZE, HIDDEN_DIM)
+        y_past = y_t[:DELAY * BATCH_SIZE // 2, :].clone()
+        y_future = y_t[DELAY * BATCH_SIZE // 2:, :].clone()
+
+        A_t = torch.linalg.matrix_power(A, DELAY // 2).T
+        y_future_hat = (y_past @ A_t)
+
+        x_future_hat = model.decoder(y_future_hat.reshape(BATCH_SIZE // 2, DELAY * HIDDEN_DIM))
+        x_future_hat = model.deembedder(x_future_hat)
+
+        x_t_plt = x_t.view(DELAY * BATCH_SIZE, 2)[DELAY * BATCH_SIZE // 2:, :]
+        x_t_plt = x_t_plt.detach().cpu().numpy()
+        x_future_hat = x_future_hat.view(BATCH_SIZE // 2 * DELAY, 2)
+        x_future_hat = x_future_hat.detach().cpu().numpy()
+        
+    log_losses = np.log(losses)
+    fig, ax = plt.subplots(1, 3, figsize = (10, 5))
+    ax[0].plot(log_losses)
+    ax[0].set_title("Log Loss")
+    ax[1].imshow(A.detach().cpu().numpy())
+    ax[1].set_title("Koopman Matrix Approximation")
+
+    #TODO : this is totally off
+    ax[2].plot(x_t_plt[:, 0],
+               x_t_plt[:, 1],
+               label = "$x_t$",
+               alpha = 0.8)
+    ax[2].plot(x_future_hat[:, 0],
+               x_future_hat[:, 1],
+               label = "$\hat{x_t}$",
+               alpha = 0.5)
+    ax[2].set_title("$x_t$ vs $\hat{x_t}$")
+
+    ax[2].legend()
+    plt.tight_layout()
 
 
 
