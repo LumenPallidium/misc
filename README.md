@@ -11,3 +11,7 @@ This is a pretty minimal model and well-annotated, as I shared it with a few peo
 ## koopman_learning
 (WIP)
 Implementation of [Learning Koopman Invariant Subspaces for Dynamic Mode Decomposition](https://arxiv.org/pdf/1710.04340.pdf), a neural network approach for learning the measurement operators in Koopman theory / Dynamic Mode Decomposition.
+
+## neural least action
+(WIP)
+Jax implementation of [A Neuronal Least-Action Principle for Real-Time Learning in Cortical Circuits](https://www.biorxiv.org/content/10.1101/2023.03.25.534198v1), a multi-compartmental neural ODE with local learning rules modeling cortical circuits.
