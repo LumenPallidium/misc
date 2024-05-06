@@ -27,41 +27,47 @@ class MultiCompartmental(nn.Module):
         # note output neurons are part of the recurrent group
         self.recurrent_indices = jnp.arange(self.in_dim, self.full_dim)
 
-        # TODO: can revist .params later
-        self.W = jax.random.normal(jax.random.PRNGKey(0),
-                                   (self.full_dim, self.dim))
-        self.voltage = jnp.zeros((self.batch_size, self.dim))
-
+    @nn.compact
     def __call__(self,
                  x,
                  expected_output: jnp.ndarray = None):
-        rate = double_relu(self.voltage)
+        
+        W = self.variable('W', 'W',
+                          nn.initializers.normal(),
+                          jax.random.PRNGKey(0),
+                          (self.full_dim, self.dim))
+        voltage = self.variable('voltage',
+                                'voltage',
+                                jnp.zeros,
+                                (self.batch_size, self.dim))
+
+        rate = double_relu(voltage.value)
         x = jnp.concatenate([x, rate], axis=-1)
 
-        activation = x @ self.W
-        voltage_error = self.voltage - activation
+        activation = x @ W.value
+        voltage_error = voltage.value - activation
         dW = self.lr * jnp.einsum('bi, bj -> bij', voltage_error, x)
 
         output_error = jnp.zeros((self.batch_size,
-                                  self.full_dim))
+                                  self.dim))
         if expected_output is not None:
-            output_error = output_error.at[self.out_indices].set(expected_output - self.voltage[self.out_indices])
+            output_error = output_error.at[self.out_indices].set(expected_output - voltage.value[self.out_indices])
 
         # TODO : feel like there should be a better way to do this
         rate_grad = jax.jvp(double_relu,
-                            (self.voltage, ),
-                            (jnp.ones_like(self.voltage), ))[1]
-        W_net = self.W[self.recurrent_indices, self.recurrent_indices]
-        back_error = rate_grad * (W_net.T @ voltage_error) + self.output_nudge * output_error
+                            (voltage.value, ),
+                            (jnp.ones_like(voltage.value), ))[1]
+        W_net = W.value[self.recurrent_indices, :]
+        back_error = rate_grad * (voltage_error @ W_net) + self.output_nudge * output_error
 
         # TODO: paper algorithm 1 says this requires some time derivatives,
         # but this formualation matches "Details for Fig. 4" section
-        dv = -self.voltage + activation + back_error
+        dv = -voltage.value + activation + back_error
         dv = dv / self.time_constant
 
-        self.voltage += self.step_size * dv
-        self.W += self.step_size * dW
-        return self.voltage
+        voltage.value += self.step_size * dv
+        W.value += self.step_size * dW.mean(axis=0).T
+        return voltage.value.copy()
 
 batch_size = 32
 model = MultiCompartmental(dim = 10,
@@ -69,4 +75,4 @@ model = MultiCompartmental(dim = 10,
                            batch_size = batch_size)
 batch = jnp.ones((batch_size, 5))
 variables = model.init(jax.random.key(0), batch)
-output = model.apply(variables, batch)
+output = model.apply(variables, batch, mutable=['voltage', 'W'])
